@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <sstream>
 #include <filesystem>
+#include <cstring>
 
 using namespace std;
 namespace fs = filesystem;
@@ -13,10 +14,30 @@ namespace fs = filesystem;
 class FileStorage {
 private:
     string baseDir;
+    static const int NUM_BUCKETS = 100;  // Fixed number of buckets to limit file count
 
-    string getFilename(const string& key) {
-        return baseDir + "/" + key + ".dat";
+    int getBucketIndex(const string& key) {
+        // Simple hash function
+        unsigned int hash = 0;
+        for (char c : key) {
+            hash = hash * 31 + c;
+        }
+        return hash % NUM_BUCKETS;
     }
+
+    string getBucketFilename(int bucketIdx) {
+        return baseDir + "/bucket_" + to_string(bucketIdx) + ".dat";
+    }
+
+    struct Entry {
+        char key[65];  // 64 bytes + null terminator
+        int value;
+
+        Entry() {
+            memset(key, 0, sizeof(key));
+            value = 0;
+        }
+    };
 
 public:
     FileStorage() {
@@ -27,62 +48,82 @@ public:
     }
 
     void insert(const string& key, int value) {
-        string filename = getFilename(key);
-        vector<int> values;
+        int bucketIdx = getBucketIndex(key);
+        string filename = getBucketFilename(bucketIdx);
 
-        // Read existing values
+        vector<Entry> entries;
+
+        // Read existing entries
         if (fs::exists(filename)) {
             ifstream infile(filename, ios::binary);
             int count;
             infile.read(reinterpret_cast<char*>(&count), sizeof(count));
-            values.resize(count);
-            infile.read(reinterpret_cast<char*>(values.data()), count * sizeof(int));
+            entries.resize(count);
+            infile.read(reinterpret_cast<char*>(entries.data()), count * sizeof(Entry));
             infile.close();
 
-            // Check if value already exists
-            if (std::find(values.begin(), values.end(), value) != values.end()) {
-                return;
+            // Check if key-value pair already exists
+            for (const auto& entry : entries) {
+                if (string(entry.key) == key && entry.value == value) {
+                    return;
+                }
             }
         }
 
-        // Add new value
-        values.push_back(value);
-        sort(values.begin(), values.end());
+        // Add new entry
+        Entry newEntry;
+        strncpy(newEntry.key, key.c_str(), 64);
+        newEntry.value = value;
+        entries.push_back(newEntry);
+
+        // Sort entries by key and value
+        sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+            int keyCmp = strcmp(a.key, b.key);
+            if (keyCmp != 0) return keyCmp < 0;
+            return a.value < b.value;
+        });
 
         // Write back to file
         ofstream outfile(filename, ios::binary);
-        int count = values.size();
+        int count = entries.size();
         outfile.write(reinterpret_cast<char*>(&count), sizeof(count));
-        outfile.write(reinterpret_cast<char*>(values.data()), count * sizeof(int));
+        outfile.write(reinterpret_cast<char*>(entries.data()), count * sizeof(Entry));
         outfile.close();
     }
 
     void remove(const string& key, int value) {
-        string filename = getFilename(key);
+        int bucketIdx = getBucketIndex(key);
+        string filename = getBucketFilename(bucketIdx);
 
         if (!fs::exists(filename)) {
             return;
         }
 
-        // Read existing values
+        // Read existing entries
         ifstream infile(filename, ios::binary);
         int count;
         infile.read(reinterpret_cast<char*>(&count), sizeof(count));
-        vector<int> values(count);
-        infile.read(reinterpret_cast<char*>(values.data()), count * sizeof(int));
+        vector<Entry> entries(count);
+        infile.read(reinterpret_cast<char*>(entries.data()), count * sizeof(Entry));
         infile.close();
 
-        // Remove value if exists
-        auto it = std::find(values.begin(), values.end(), value);
-        if (it != values.end()) {
-            values.erase(it);
+        // Remove entry if exists
+        bool found = false;
+        for (auto it = entries.begin(); it != entries.end(); ++it) {
+            if (string(it->key) == key && it->value == value) {
+                entries.erase(it);
+                found = true;
+                break;
+            }
+        }
 
+        if (found) {
             // Write back to file
             ofstream outfile(filename, ios::binary);
-            int newCount = values.size();
+            int newCount = entries.size();
             outfile.write(reinterpret_cast<char*>(&newCount), sizeof(newCount));
             if (newCount > 0) {
-                outfile.write(reinterpret_cast<char*>(values.data()), newCount * sizeof(int));
+                outfile.write(reinterpret_cast<char*>(entries.data()), newCount * sizeof(Entry));
             }
             outfile.close();
 
@@ -94,20 +135,28 @@ public:
     }
 
     vector<int> find(const string& key) {
-        string filename = getFilename(key);
+        int bucketIdx = getBucketIndex(key);
+        string filename = getBucketFilename(bucketIdx);
         vector<int> result;
 
         if (!fs::exists(filename)) {
             return result;
         }
 
-        // Read values from file
+        // Read entries from file
         ifstream infile(filename, ios::binary);
         int count;
         infile.read(reinterpret_cast<char*>(&count), sizeof(count));
-        result.resize(count);
-        infile.read(reinterpret_cast<char*>(result.data()), count * sizeof(int));
+        vector<Entry> entries(count);
+        infile.read(reinterpret_cast<char*>(entries.data()), count * sizeof(Entry));
         infile.close();
+
+        // Find all values for the given key
+        for (const auto& entry : entries) {
+            if (string(entry.key) == key) {
+                result.push_back(entry.value);
+            }
+        }
 
         return result;
     }
